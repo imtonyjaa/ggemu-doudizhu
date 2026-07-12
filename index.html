@@ -221,11 +221,14 @@
 
         finishRound: function (settlement) {
           var winGold = Number(settlement && settlement.gold);
+          var bottomScore = Number(settlement && settlement.bottomScore);
+          var multipleNumber = Number(settlement && settlement.multipleNumber);
           if (settlement && settlement.isWin === true && isFinite(winGold) && winGold > 0) {
             this.markGameStart();
             callSdk("logGameFinish", {
               score: winGold,
-              coins: winGold,
+              Base: isFinite(bottomScore) ? bottomScore : 0,
+              Mult: isFinite(multipleNumber) ? multipleNumber : 0,
             });
           }
           this.gameStarted = false;
