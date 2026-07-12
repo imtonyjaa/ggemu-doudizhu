@@ -52,6 +52,190 @@
 
   <script src="src/settings.3653b.js" charset="utf-8"></script>
 
+  <script src="https://ggemu.com/api/ggemu-sdk.js"></script>
+
+  <script type="text/javascript">
+    (function () {
+      var originalGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (type, options) {
+        if (type === "webgl" || type === "experimental-webgl" || type === "webgl2") {
+          var nextOptions = {};
+          options = options || {};
+          for (var key in options) {
+            if (Object.prototype.hasOwnProperty.call(options, key)) {
+              nextOptions[key] = options[key];
+            }
+          }
+          nextOptions.preserveDrawingBuffer = true;
+          options = nextOptions;
+        }
+        return originalGetContext.call(this, type, options);
+      };
+
+      var OriginalAudioContext = window.AudioContext || window.webkitAudioContext;
+      var originalAudioNodeConnect = window.AudioNode && window.AudioNode.prototype.connect;
+
+      function reportError(error) {
+        if (window.console && console.error) {
+          console.error(error);
+        }
+      }
+
+      function callSdk(methodName) {
+        if (!window.GGEMU || typeof window.GGEMU[methodName] !== "function") {
+          return null;
+        }
+
+        try {
+          var args = Array.prototype.slice.call(arguments, 1);
+          var result = window.GGEMU[methodName].apply(window.GGEMU, args);
+          if (result && typeof result.catch === "function") {
+            result.catch(reportError);
+          }
+          return result;
+        } catch (error) {
+          reportError(error);
+          return null;
+        }
+      }
+
+      if (OriginalAudioContext && originalAudioNodeConnect) {
+        class InterceptedAudioContext extends OriginalAudioContext {
+          constructor() {
+            super(...arguments);
+            window.__ggemuDdzAudioContext = this;
+            window.__ggemuDdzMasterGain = this.createGain();
+            originalAudioNodeConnect.call(window.__ggemuDdzMasterGain, this.destination);
+            setTimeout(function () {
+              if (window.__GGEMU_DDZ__) {
+                window.__GGEMU_DDZ__.registerAudioIfReady();
+              }
+            }, 0);
+          }
+        }
+
+        window.AudioContext = InterceptedAudioContext;
+        if (window.webkitAudioContext) {
+          window.webkitAudioContext = InterceptedAudioContext;
+        }
+
+        window.AudioNode.prototype.connect = function () {
+          var args = Array.prototype.slice.call(arguments);
+          if (window.__ggemuDdzAudioContext && args[0] === window.__ggemuDdzAudioContext.destination) {
+            args[0] = window.__ggemuDdzMasterGain;
+          }
+          return originalAudioNodeConnect.apply(this, args);
+        };
+      }
+
+      window.__GGEMU_DDZ__ = {
+        gameStarted: false,
+        audioRegistered: false,
+        liveStarted: false,
+        readySet: false,
+
+        init: function () {
+          var canvas = document.getElementById("GameCanvas");
+
+          callSdk("init", {
+            debug: false,
+            parentOrigin: "*",
+          });
+
+          if (canvas) {
+            callSdk("registerCanvas", canvas);
+          }
+
+          callSdk("setInputHandler", function (input) {
+            return window.__GGEMU_DDZ__.dispatchInput(input);
+          });
+
+          window.addEventListener("pointerdown", this.registerAudioIfReady.bind(this));
+          window.addEventListener("keydown", this.registerAudioIfReady.bind(this));
+        },
+
+        dispatchInput: function (input) {
+          if (!input || !input.action) {
+            return true;
+          }
+
+          var event = new KeyboardEvent(input.action, {
+            key: input.key || "",
+            code: input.code || "",
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            repeat: Boolean(input.repeat),
+          });
+          var canvas = document.getElementById("GameCanvas");
+          (canvas || document).dispatchEvent(event);
+          return true;
+        },
+
+        setReadyAfterScene: function () {
+          var self = this;
+
+          function setReady() {
+            if (self.readySet) {
+              return;
+            }
+            self.readySet = true;
+            callSdk("setReady", {
+              game: "doudizhu",
+              engine: "cocos-creator",
+            });
+            self.startLive();
+          }
+
+          if (window.cc && cc.director && cc.Director) {
+            cc.director.once(cc.Director.EVENT_AFTER_SCENE_LAUNCH, setReady);
+          } else {
+            setTimeout(setReady, 0);
+          }
+        },
+
+        registerAudioIfReady: function () {
+          if (this.audioRegistered || !window.__ggemuDdzMasterGain) {
+            return;
+          }
+          this.audioRegistered = true;
+          callSdk("registerAudioNode", window.__ggemuDdzMasterGain);
+        },
+
+        startLive: function () {
+          if (this.liveStarted) {
+            return;
+          }
+          this.liveStarted = true;
+          this.registerAudioIfReady();
+          callSdk("startLive");
+        },
+
+        markGameStart: function () {
+          if (this.gameStarted) {
+            return;
+          }
+          this.gameStarted = true;
+          callSdk("logGameStart");
+        },
+
+        finishRound: function (settlement) {
+          var winGold = Number(settlement && settlement.gold);
+          if (settlement && settlement.isWin === true && isFinite(winGold) && winGold > 0) {
+            this.markGameStart();
+            callSdk("logGameFinish", {
+              score: winGold,
+              coins: winGold,
+            });
+          }
+          this.gameStarted = false;
+        },
+      };
+
+      window.__GGEMU_DDZ__.init();
+    })();
+  </script>
+
   <script src="main.7d29a.js" charset="utf-8"></script>
 
   <script type="text/javascript">
@@ -78,11 +262,18 @@
         document.body.appendChild(domScript);
       }
 
+      function bootGame() {
+        if (window.__GGEMU_DDZ__) {
+          window.__GGEMU_DDZ__.setReadyAfterScene();
+        }
+        window.boot();
+      }
+
       loadScript(debug ? "cocos2d-js.js" : "cocos2d-js-min.a7c04.js", function () {
         if (CC_PHYSICS_BUILTIN || CC_PHYSICS_CANNON) {
-          loadScript(debug ? "physics.js" : "physics-min.941a2.js", window.boot);
+          loadScript(debug ? "physics.js" : "physics-min.941a2.js", bootGame);
         } else {
-          window.boot();
+          bootGame();
         }
       });
     })();
