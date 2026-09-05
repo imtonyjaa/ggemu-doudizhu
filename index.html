@@ -52,7 +52,7 @@
 
   <script src="src/settings.3653b.js" charset="utf-8"></script>
 
-  <script src="https://ggemu.com/api/ggemu-sdk.js?v=0.1.4"></script>
+  <script src="https://ggemu.com/api/ggemu-sdk.js"></script>
 
   <script type="text/javascript">
     (function () {
@@ -99,6 +99,10 @@
         }
       }
 
+      function isGcoinMode() {
+        return new URLSearchParams(window.location.search).get("gcoin") === "1";
+      }
+
       if (OriginalAudioContext && originalAudioNodeConnect) {
         class InterceptedAudioContext extends OriginalAudioContext {
           constructor() {
@@ -133,6 +137,10 @@
         audioRegistered: false,
         liveStarted: false,
         readySet: false,
+        gcoinMode: isGcoinMode(),
+        gcoinBalance: null,
+        gcoinEventsBound: false,
+        gcoinQueue: Promise.resolve(),
 
         init: function () {
           var canvas = document.getElementById("GameCanvas");
@@ -150,8 +158,139 @@
             return window.__GGEMU_DDZ__.dispatchInput(input);
           });
 
+          if (this.gcoinMode) {
+            this.bindGcoinEvents();
+            this.refreshGcoinBalance();
+          }
+
           window.addEventListener("pointerdown", this.registerAudioIfReady.bind(this));
           window.addEventListener("keydown", this.registerAudioIfReady.bind(this));
+        },
+
+        isGcoinMode: function () {
+          return this.gcoinMode;
+        },
+
+        getBottomScore: function () {
+          return this.gcoinMode ? 10 : 100;
+        },
+
+        getBalanceFromState: function (state) {
+          var bag = state && state.bag ? state.bag : state;
+          var balance = Number(bag && bag.bag_count);
+          if (!bag || !isFinite(balance)) {
+            return null;
+          }
+          return Math.max(0, Math.floor(balance));
+        },
+
+        applyGcoinState: function (state) {
+          var balance = this.getBalanceFromState(state);
+          if (balance === null) {
+            return null;
+          }
+          this.gcoinBalance = balance;
+          this.syncGameGold();
+          return balance;
+        },
+
+        syncGameGold: function () {
+          if (!this.gcoinMode || typeof defines === "undefined") {
+            return;
+          }
+          defines.gold = this.gcoinBalance === null ? 0 : this.gcoinBalance;
+        },
+
+        bindGcoinEvents: function () {
+          var self = this;
+          if (this.gcoinEventsBound || !window.GGEMU || typeof window.GGEMU.on !== "function") {
+            return;
+          }
+          this.gcoinEventsBound = true;
+          window.GGEMU.on("ggemu:bag-updated", function (payload) {
+            self.applyGcoinState(payload);
+          });
+        },
+
+        callGcoinSdk: function (methodName, amount) {
+          if (!window.GGEMU || typeof window.GGEMU[methodName] !== "function") {
+            return Promise.resolve(null);
+          }
+
+          try {
+            var result = amount === undefined
+              ? window.GGEMU[methodName]()
+              : window.GGEMU[methodName](amount);
+            return Promise.resolve(result).catch(function () {
+              return null;
+            });
+          } catch (error) {
+            return Promise.resolve(null);
+          }
+        },
+
+        requestGcoinBalance: function () {
+          var self = this;
+          return this.callGcoinSdk("getBagStatus").then(function (state) {
+            return self.applyGcoinState(state);
+          });
+        },
+
+        queueGcoinTask: function (task) {
+          var self = this;
+          var runTask = function () {
+            return task.call(self);
+          };
+          this.gcoinQueue = this.gcoinQueue.then(runTask, runTask).catch(function () {
+            return null;
+          });
+          return this.gcoinQueue;
+        },
+
+        refreshGcoinBalance: function () {
+          if (!this.gcoinMode) {
+            return Promise.resolve(null);
+          }
+          return this.queueGcoinTask(this.requestGcoinBalance);
+        },
+
+        updateGcoinBalance: function (methodName, amount) {
+          var self = this;
+          return this.callGcoinSdk(methodName, amount).then(function (state) {
+            var balance = self.applyGcoinState(state);
+            return balance === null ? self.requestGcoinBalance() : balance;
+          });
+        },
+
+        changeGold: function (change) {
+          if (!this.gcoinMode) {
+            return false;
+          }
+
+          var self = this;
+          var value = Number(change);
+          var amount = Math.floor(Math.abs(value));
+          if (!isFinite(value) || amount <= 0) {
+            return true;
+          }
+
+          this.queueGcoinTask(function () {
+            if (value > 0) {
+              return self.updateGcoinBalance("addBagCoins", amount);
+            }
+
+            return self.requestGcoinBalance().then(function (balance) {
+              if (balance === null) {
+                return null;
+              }
+              var deduction = Math.min(balance, amount);
+              if (deduction <= 0) {
+                return 0;
+              }
+              return self.updateGcoinBalance("useBagCoins", deduction);
+            });
+          });
+          return true;
         },
 
         dispatchInput: function (input) {
@@ -180,6 +319,7 @@
               return;
             }
             self.readySet = true;
+            self.syncGameGold();
             callSdk("setReady", {
               game: "doudizhu",
               engine: "cocos-creator",
